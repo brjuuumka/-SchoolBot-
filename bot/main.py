@@ -1,5 +1,6 @@
 import json
 import asyncio
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -7,8 +8,16 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboard
     ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, \
     filters, ContextTypes
+from telegram.request import HTTPXRequest
 
-from bot.database import Database
+from bot.datebase import Database
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 TOKEN = "8637734040:AAEOJA4vQ1-Da2abanKOCVuR5ArTNESJhnc"
 
@@ -22,7 +31,8 @@ REG_ROLE, REG_FULL_NAME, REG_USERNAME, REG_PASSWORD, REG_CLASS, REG_SUBJECT, REG
 BROADCAST_TEXT = 0
 
 # Состояния для учителя
-TEACHER_SELECT_CLASS, TEACHER_SELECT_STUDENT, TEACHER_ENTER_GRADE, TEACHER_ENTER_COMMENT, TEACHER_ENTER_HOMEWORK, TEACHER_SELECT_SUBJECT = range(6)
+TEACHER_SELECT_CLASS, TEACHER_SELECT_STUDENT, TEACHER_ENTER_GRADE, TEACHER_ENTER_COMMENT, TEACHER_ENTER_HOMEWORK, TEACHER_SELECT_SUBJECT = range(
+    6)
 
 
 class SchoolBot:
@@ -33,9 +43,30 @@ class SchoolBot:
         self.user_sessions = {}  # telegram_id -> user_id
 
     async def initialize(self):
-        """Инициализация приложения"""
-        self.application = Application.builder().token(self.token).build()
-        self.setup_handlers()
+        """Инициализация приложения с улучшенными настройками для избежания таймаутов"""
+        try:
+            # Создаем request с увеличенными таймаутами
+            request = HTTPXRequest(
+                connect_timeout=60.0,  # 60 секунд на подключение
+                read_timeout=60.0,  # 60 секунд на чтение
+                write_timeout=60.0,  # 60 секунд на запись
+                pool_timeout=60.0,  # 60 секунд на ожидание из пула
+                http_version="1.1",  # Используем HTTP/1.1
+            )
+
+            self.application = Application.builder() \
+                .token(self.token) \
+                .request(request) \
+                .build()
+
+            self.setup_handlers()
+            logger.info("✅ Приложение успешно инициализировано")
+
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка при инициализации: {e}")
+            # Fallback - простая инициализация
+            self.application = Application.builder().token(self.token).build()
+            self.setup_handlers()
 
     def setup_handlers(self):
         """Настройка обработчиков команд"""
@@ -62,6 +93,7 @@ class SchoolBot:
                 REG_CHILD: [CallbackQueryHandler(self.reg_select_child)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_command)],
+
         )
 
         # Conversation для рассылки
@@ -71,6 +103,7 @@ class SchoolBot:
                 BROADCAST_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.send_broadcast)],
             },
             fallbacks=[CommandHandler("cancel", self.cancel_command)],
+
         )
 
         self.application.add_handler(auth_conv)
@@ -434,7 +467,8 @@ class SchoolBot:
             if students:
                 keyboard = []
                 for student in students:
-                    keyboard.append([InlineKeyboardButton(student['full_name'], callback_data=f"student_{student['id']}")])
+                    keyboard.append(
+                        [InlineKeyboardButton(student['full_name'], callback_data=f"student_{student['id']}")])
                 keyboard.append([InlineKeyboardButton("🔙 Отмена", callback_data="cancel_registration")])
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1003,7 +1037,8 @@ class SchoolBot:
         class_info = self.db.get_class_by_id(class_id)
 
         if not schedule:
-            await query.edit_message_text(f"❌ Расписание для класса *{class_info['name']}* не найдено.", parse_mode='Markdown')
+            await query.edit_message_text(f"❌ Расписание для класса *{class_info['name']}* не найдено.",
+                                          parse_mode='Markdown')
             return
 
         days = {
@@ -1039,7 +1074,8 @@ class SchoolBot:
 
         keyboard = []
         for student in students:
-            keyboard.append([InlineKeyboardButton(f"👨‍🎓 {student['full_name']}", callback_data=f"teacher_student_{student['id']}")])
+            keyboard.append(
+                [InlineKeyboardButton(f"👨‍🎓 {student['full_name']}", callback_data=f"teacher_student_{student['id']}")])
 
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1060,7 +1096,8 @@ class SchoolBot:
             [InlineKeyboardButton("❌ Отметить пропуск", callback_data="teacher_action_absent")],
             [InlineKeyboardButton("💬 Написать замечание", callback_data="teacher_action_comment")],
             [InlineKeyboardButton("📊 Статистика ученика", callback_data="teacher_action_stats")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="teacher_class_" + str(context.user_data['selected_class_id']))]
+            [InlineKeyboardButton("🔙 Назад",
+                                  callback_data="teacher_class_" + str(context.user_data['selected_class_id']))]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1087,32 +1124,81 @@ class SchoolBot:
         """Проверяет авторизацию"""
         return telegram_id in self.user_sessions
 
-    async def run(self):
-        """Запуск бота"""
-        await self.initialize()
-        await self.application.initialize()
-        await self.application.start()
-        await self.application.updater.start_polling()
+    async def run(self, retry_count=3):
+        """Запуск бота с повторными попытками"""
+        for attempt in range(retry_count):
+            try:
+                print(f"\n🚀 Попытка запуска {attempt + 1}/{retry_count}...")
 
-        print("✅ Бот SchoolBot запущен и работает!")
-        print("📋 Тестовые аккаунты:")
-        print("   👑 Админ: admin / admin")
-        print("   👩‍🏫 Учитель: math_teacher / 123")
-        print("   👨‍🎓 Ученик: ivanov / 123")
-        print("   👪 Родитель: parent_ivanov / 123")
+                # Инициализация с улучшенными настройками
+                await self.initialize()
 
-        # Держим бота запущенным
-        stop_signal = asyncio.Event()
-        await stop_signal.wait()
+                # Проверяем подключение к Telegram
+                print("🔌 Проверка подключения к Telegram API...")
+                bot_info = await self.application.bot.get_me()
+                print(f"✅ Подключено к боту: @{bot_info.username}")
+
+                # Запускаем бота
+                await self.application.initialize()
+                await self.application.start()
+                await self.application.updater.start_polling()
+
+                print("\n" + "=" * 50)
+                print("✅ Бот SchoolBot успешно запущен и работает!")
+                print("=" * 50)
+                print("\n📋 Тестовые аккаунты:")
+                print("   👑 Администратор: admin / admin")
+                print("   👩‍🏫 Учитель: math_teacher / 123")
+                print("   👨‍🎓 Ученик: ivanov / 123")
+                print("   👪 Родитель: parent_ivanov / 123")
+                print("\n💡 Найдите бота в Telegram и отправьте /start")
+                print("⏹️ Нажмите Ctrl+C для остановки бота\n")
+
+                # Ожидаем остановки
+                stop_signal = asyncio.Event()
+                await stop_signal.wait()
+                return
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка при попытке {attempt + 1}: {e}")
+
+                if attempt < retry_count - 1:
+                    wait_time = 10 * (attempt + 1)
+                    print(f"⏳ Повторная попытка через {wait_time} секунд...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    print("\n" + "=" * 50)
+                    print("❌ НЕ УДАЛОСЬ ЗАПУСТИТЬ БОТА")
+                    print("=" * 50)
+                    print("\nВозможные причины:")
+                    print("1. Нет интернет-соединения")
+                    print("2. Telegram API заблокирован (нужен VPN/прокси)")
+                    print("3. Неправильный токен бота")
+                    print("4. Проблемы с DNS")
+                    print("\nПроверьте подключение:")
+                    print("   https://api.telegram.org/bot" + self.token + "/getMe")
+                    print("\nЕсли API не открывается - нужен VPN или прокси")
+                    raise
 
 
 async def main():
     """Главная функция"""
-    if TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ ОШИБКА: Укажите токен бота в переменной TOKEN")
-        print("📝 Получите токен у @BotFather в Telegram")
-        return
+    # Проверяем наличие токена
+    if TOKEN == "8637734040:AAEOJA4vQ1-Da2abanKOCVuR5ArTNESJhnc":
+        print("✅ Токен бота установлен")
 
+    # Проверка интернета перед запуском
+    print("\n🔍 Проверка подключения к интернету...")
+    try:
+        import socket
+        socket.create_connection(("api.telegram.org", 443), timeout=5)
+        print("✅ Интернет-соединение с Telegram API доступно")
+    except Exception as e:
+        print(f"⚠️ Нет соединения с api.telegram.org: {e}")
+        print("💡 Возможно, потребуется VPN или прокси для доступа к Telegram API")
+        print("💡 Или проверьте интернет-соединение\n")
+
+    # Запускаем бота
     bot = SchoolBot(TOKEN)
     await bot.run()
 
@@ -1121,4 +1207,6 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
+        print("\n🛑 Бот остановлен пользователем")
+    except Exception as e:
+        print(f"\n❌ Критическая ошибка: {e}")
