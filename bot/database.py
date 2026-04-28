@@ -1,5 +1,7 @@
 import sqlite3
 import hashlib
+import time
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
@@ -8,29 +10,41 @@ from contextlib import contextmanager
 class Database:
     def __init__(self, db_path: str = "schoolbot.db"):
         self.db_path = db_path
+        self._local = threading.local()
         self.init_tables()
-        self.create_test_data()  # Автоматически создаем тестовые данные
+        self.create_test_data()
 
     @contextmanager
     def get_connection(self):
-        """Контекстный менеджер для соединения с БД"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # Чтобы можно было обращаться по именам колонок
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        """Контекстный менеджер для соединения с БД с обработкой блокировок"""
+        conn = None
+        max_retries = 5
+        retry_delay = 0.1
+
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=10)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                yield conn
+                conn.commit()
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" in str(e) and attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                raise
+            finally:
+                if conn:
+                    conn.close()
 
     def init_tables(self):
         """Создаёт все таблицы, если их нет"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Таблица пользователей
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +59,6 @@ class Database:
                 )
             ''')
 
-            # Таблица классов
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS classes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +68,6 @@ class Database:
                 )
             ''')
 
-            # Таблица связей родитель-ребёнок
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS student_parents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +79,6 @@ class Database:
                 )
             ''')
 
-            # Таблица оценок
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS grades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +93,6 @@ class Database:
                 )
             ''')
 
-            # Таблица посещаемости
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS attendance (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +106,6 @@ class Database:
                 )
             ''')
 
-            # Таблица домашних заданий
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS homeworks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,7 +120,6 @@ class Database:
                 )
             ''')
 
-            # Таблица замечаний
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS comments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,7 +133,6 @@ class Database:
                 )
             ''')
 
-            # Таблица уведомлений
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,7 +144,6 @@ class Database:
                 )
             ''')
 
-            # Таблица расписания
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS schedule (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,115 +155,176 @@ class Database:
                 )
             ''')
 
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS teacher_subjects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    teacher_id INTEGER NOT NULL,
+                    subject TEXT NOT NULL,
+                    FOREIGN KEY (teacher_id) REFERENCES users(id),
+                    UNIQUE(teacher_id, subject)
+                )
+            ''')
+
     def create_test_data(self):
         """Создает тестовые данные для бота"""
-        print("📝 Проверка и создание тестовых данных...")
+        try:
+            print("📝 Проверка и создание тестовых данных...")
 
-        # Создаем тестовый класс
-        class_id = self.create_class("5А")
-        if class_id:
-            print("✅ Создан тестовый класс: 5А")
-        else:
-            # Если класс уже существует, получаем его ID
-            class_id = self.get_class_id_by_name("5А")
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
 
-        # Хешируем пароли
-        def hash_password(password):
-            return hashlib.sha256(password.encode()).hexdigest()
+                cursor.execute("SELECT id FROM classes WHERE name = '5А'")
+                existing_class = cursor.fetchone()
 
-        # Тестовые пользователи
-        test_users = [
-            ("admin", hash_password("admin"), "Администратор школы", "admin", None, None),
-            ("math_teacher", hash_password("123"), "Иванова Мария Петровна", "teacher", None, "Математика"),
-            ("ivanov", hash_password("123"), "Иванов Иван Иванович", "student", class_id, None),
-            ("parent_ivanov", hash_password("123"), "Иванова Елена Сергеевна", "parent", None, None),
-            ("petrova", hash_password("123"), "Петрова Анна Владимировна", "class_teacher", class_id, "Русский язык"),
-        ]
+                if existing_class:
+                    class_id = existing_class['id']
+                    print("✅ Класс 5А уже существует")
+                else:
+                    cursor.execute("INSERT INTO classes (name) VALUES ('5А')")
+                    class_id = cursor.lastrowid
+                    print("✅ Создан тестовый класс: 5А")
 
-        created_users = []
-        for username, password_hash, full_name, role, class_id_val, subject in test_users:
-            user_id = self.create_user_with_hash(username, password_hash, full_name, role, class_id_val, subject)
-            if user_id:
-                print(f"✅ Создан пользователь: {username} ({role})")
-                created_users.append((username, user_id))
-            else:
-                # Пользователь уже существует
-                print(f"⚠️ Пользователь {username} уже существует")
-                # Получаем ID существующего пользователя
-                user = self.get_user_by_username(username)
-                if user:
-                    created_users.append((username, user['id']))
+                def hash_password(password):
+                    return hashlib.sha256(password.encode()).hexdigest()
 
-        # Связываем родителя с ребенком
-        parent = self.get_user_by_username("parent_ivanov")
-        child = self.get_user_by_username("ivanov")
-
-        if parent and child:
-            if self.link_parent_to_student(parent['id'], child['id']):
-                print("✅ Создана связь родитель-ребенок")
-
-        # Добавляем тестовые оценки для ученика
-        if child:
-            teacher = self.get_user_by_username("math_teacher")
-            if teacher:
-                # Проверяем, есть ли уже оценки
-                existing_grades = self.get_grades_by_student(child['id'])
-                if not existing_grades:
-                    test_grades = [
-                        (child['id'], "Математика", 5, teacher['id'], "Отлично!"),
-                        (child['id'], "Математика", 4, teacher['id'], "Хорошо"),
-                        (child['id'], "Математика", 5, teacher['id'], "Молодец"),
-                        (child['id'], "Русский язык", 4, teacher['id'], "Хорошо"),
-                        (child['id'], "Русский язык", 5, teacher['id'], "Отлично!"),
-                    ]
-                    for grade_data in test_grades:
-                        self.add_grade(*grade_data)
-                    print("✅ Добавлены тестовые оценки")
-
-        # Добавляем тестовое расписание
-        if class_id:
-            existing_schedule = self.get_schedule_by_class(class_id)
-            if not existing_schedule:
-                test_schedule = [
-                    (class_id, 1, 1, "Математика"),
-                    (class_id, 1, 2, "Русский язык"),
-                    (class_id, 1, 3, "Английский язык"),
-                    (class_id, 2, 1, "Физика"),
-                    (class_id, 2, 2, "Математика"),
-                    (class_id, 2, 3, "История"),
-                    (class_id, 3, 1, "Русский язык"),
-                    (class_id, 3, 2, "Литература"),
-                    (class_id, 3, 3, "Математика"),
-                    (class_id, 4, 1, "Биология"),
-                    (class_id, 4, 2, "География"),
-                    (class_id, 4, 3, "Английский язык"),
-                    (class_id, 5, 1, "Математика"),
-                    (class_id, 5, 2, "Русский язык"),
-                    (class_id, 5, 3, "Физкультура"),
+                test_users = [
+                    ("admin", hash_password("admin"), "Администратор школы", "admin", None, None),
+                    ("math_teacher", hash_password("123"), "Иванова Мария Петровна", "teacher", None, "Математика"),
+                    ("russian_teacher", hash_password("123"), "Петрова Анна Владимировна", "teacher", None,
+                     "Русский язык"),
+                    ("ivanov", hash_password("123"), "Иванов Иван Иванович", "student", class_id, None),
+                    ("parent_ivanov", hash_password("123"), "Иванова Елена Сергеевна", "parent", None, None),
+                    ("petrova", hash_password("123"), "Петрова Анна Владимировна", "class_teacher", class_id,
+                     "Русский язык"),
                 ]
-                for schedule_data in test_schedule:
-                    self.add_schedule_entry(*schedule_data)
-                print("✅ Добавлено тестовое расписание")
 
-        print("📋 Тестовые данные готовы!")
-        print("\n🔑 Тестовые учетные записи:")
-        print("   👑 Администратор: admin / admin")
-        print("   👩‍🏫 Учитель: math_teacher / 123")
-        print("   👨‍🎓 Ученик: ivanov / 123")
-        print("   👪 Родитель: parent_ivanov / 123")
-        print("   👔 Классный руководитель: petrova / 123\n")
+                for username, password_hash, full_name, role, class_id_val, subject in test_users:
+                    cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+                    existing_user = cursor.fetchone()
+
+                    if existing_user:
+                        print(f"⚠️ Пользователь {username} уже существует")
+                        user_id = existing_user['id']
+                    else:
+                        cursor.execute('''
+                            INSERT INTO users (username, password_hash, full_name, role, class_id, subject)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (username, password_hash, full_name, role, class_id_val, subject))
+                        user_id = cursor.lastrowid
+                        print(f"✅ Создан пользователь: {username} ({role})")
+
+                        if role == 'teacher' and subject:
+                            subjects = [s.strip() for s in subject.split(',')]
+                            for subj in subjects:
+                                try:
+                                    cursor.execute('''
+                                        INSERT INTO teacher_subjects (teacher_id, subject)
+                                        VALUES (?, ?)
+                                    ''', (user_id, subj))
+                                except sqlite3.IntegrityError:
+                                    pass
+
+                cursor.execute("SELECT id FROM users WHERE username = 'math_teacher'")
+                math_teacher = cursor.fetchone()
+                if math_teacher:
+                    for subj in ["Математика", "Алгебра", "Геометрия"]:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO teacher_subjects (teacher_id, subject)
+                                VALUES (?, ?)
+                            ''', (math_teacher['id'], subj))
+                        except sqlite3.IntegrityError:
+                            pass
+
+                cursor.execute("SELECT id FROM users WHERE username = 'parent_ivanov'")
+                parent = cursor.fetchone()
+                cursor.execute("SELECT id FROM users WHERE username = 'ivanov'")
+                child = cursor.fetchone()
+
+                if parent and child:
+                    try:
+                        cursor.execute('''
+                            INSERT INTO student_parents (student_id, parent_id)
+                            VALUES (?, ?)
+                        ''', (child['id'], parent['id']))
+                        print("✅ Создана связь родитель-ребенок")
+                    except sqlite3.IntegrityError:
+                        print("⚠️ Связь родитель-ребенок уже существует")
+
+                if child:
+                    cursor.execute("SELECT id FROM users WHERE username = 'math_teacher'")
+                    math_teacher = cursor.fetchone()
+
+                    if math_teacher:
+                        cursor.execute("SELECT COUNT(*) as count FROM grades WHERE student_id = ?", (child['id'],))
+                        existing_grades = cursor.fetchone()
+
+                        if existing_grades and existing_grades['count'] == 0:
+                            test_grades = [
+                                (child['id'], "Математика", 5, math_teacher['id'], "Отлично!"),
+                                (child['id'], "Математика", 4, math_teacher['id'], "Хорошо"),
+                                (child['id'], "Математика", 5, math_teacher['id'], "Молодец"),
+                                (child['id'], "Алгебра", 4, math_teacher['id'], "Хорошо"),
+                                (child['id'], "Геометрия", 5, math_teacher['id'], "Отлично!"),
+                            ]
+                            for grade_data in test_grades:
+                                cursor.execute('''
+                                    INSERT INTO grades (student_id, subject, grade, teacher_id, comment)
+                                    VALUES (?, ?, ?, ?, ?)
+                                ''', grade_data)
+                            print("✅ Добавлены тестовые оценки")
+                        else:
+                            print("⚠️ Тестовые оценки уже существуют")
+
+                if class_id:
+                    cursor.execute("SELECT COUNT(*) as count FROM schedule WHERE class_id = ?", (class_id,))
+                    existing_schedule = cursor.fetchone()
+
+                    if existing_schedule and existing_schedule['count'] == 0:
+                        test_schedule = [
+                            (class_id, 1, 1, "Математика"),
+                            (class_id, 1, 2, "Русский язык"),
+                            (class_id, 1, 3, "Английский язык"),
+                            (class_id, 2, 1, "Физика"),
+                            (class_id, 2, 2, "Математика"),
+                            (class_id, 2, 3, "История"),
+                            (class_id, 3, 1, "Русский язык"),
+                            (class_id, 3, 2, "Литература"),
+                            (class_id, 3, 3, "Математика"),
+                            (class_id, 4, 1, "Биология"),
+                            (class_id, 4, 2, "География"),
+                            (class_id, 4, 3, "Английский язык"),
+                            (class_id, 5, 1, "Математика"),
+                            (class_id, 5, 2, "Русский язык"),
+                            (class_id, 5, 3, "Физкультура"),
+                        ]
+                        for schedule_data in test_schedule:
+                            cursor.execute('''
+                                INSERT INTO schedule (class_id, day_of_week, lesson_number, subject)
+                                VALUES (?, ?, ?, ?)
+                            ''', schedule_data)
+                        print("✅ Добавлено тестовое расписание")
+                    else:
+                        print("⚠️ Расписание уже существует")
+
+            print("📋 Тестовые данные готовы!")
+            print("\n🔑 Тестовые учетные записи:")
+            print("   👑 Администратор: admin / admin")
+            print("   👩‍🏫 Учитель математики: math_teacher / 123 (предметы: Математика, Алгебра, Геометрия)")
+            print("   👩‍🏫 Учитель русского: russian_teacher / 123")
+            print("   👨‍🎓 Ученик: ivanov / 123")
+            print("   👪 Родитель: parent_ivanov / 123")
+            print("   👔 Классный руководитель: petrova / 123\n")
+
+        except Exception as e:
+            print(f"⚠️ Ошибка при создании тестовых данных: {e}")
 
     # ---------- ПОЛЬЗОВАТЕЛИ ----------
 
     def create_user(self, username: str, password: str, full_name: str, role: str,
                     class_id: int = None, subject: str = None) -> Optional[int]:
-        """Создаёт нового пользователя. Возвращает ID или None"""
         password_hash = hashlib.sha256(password.encode()).hexdigest()
-        return self.create_user_with_hash(username, password_hash, full_name, role, class_id, subject)
 
-    def create_user_with_hash(self, username: str, password_hash: str, full_name: str, role: str,
-                              class_id: int = None, subject: str = None) -> Optional[int]:
-        """Создаёт пользователя с уже хешированным паролем"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             try:
@@ -265,12 +332,50 @@ class Database:
                     INSERT INTO users (username, password_hash, full_name, role, class_id, subject)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (username, password_hash, full_name, role, class_id, subject))
-                return cursor.lastrowid
+                user_id = cursor.lastrowid
+
+                if role == 'teacher' and subject:
+                    subjects = [s.strip() for s in subject.split(',')]
+                    for subj in subjects:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO teacher_subjects (teacher_id, subject)
+                                VALUES (?, ?)
+                            ''', (user_id, subj))
+                        except sqlite3.IntegrityError:
+                            pass
+
+                return user_id
+            except sqlite3.IntegrityError:
+                return None
+
+    def create_user_with_hash(self, username: str, password_hash: str, full_name: str, role: str,
+                              class_id: int = None, subject: str = None) -> Optional[int]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT INTO users (username, password_hash, full_name, role, class_id, subject)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (username, password_hash, full_name, role, class_id, subject))
+                user_id = cursor.lastrowid
+
+                if role == 'teacher' and subject:
+                    subjects = [s.strip() for s in subject.split(',')]
+                    for subj in subjects:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO teacher_subjects (teacher_id, subject)
+                                VALUES (?, ?)
+                            ''', (user_id, subj))
+                        except sqlite3.IntegrityError:
+                            pass
+
+                return user_id
             except sqlite3.IntegrityError:
                 return None
 
     def authenticate_user(self, username: str, password: str) -> Optional[Dict]:
-        """Проверяет логин/пароль. Возвращает данные пользователя или None"""
         password_hash = hashlib.sha256(password.encode()).hexdigest()
 
         with self.get_connection() as conn:
@@ -283,14 +388,21 @@ class Database:
             return dict(row) if row else None
 
     def update_telegram_id(self, user_id: int, telegram_id: int) -> bool:
-        """Привязывает Telegram ID к пользователю"""
+        """Привязывает Telegram ID к пользователю, удаляя старую привязку если есть"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('UPDATE users SET telegram_id = ? WHERE id = ?', (telegram_id, user_id))
-            return cursor.rowcount > 0
+            try:
+                cursor.execute('SELECT id FROM users WHERE telegram_id = ? AND id = ?', (telegram_id, user_id))
+                if cursor.fetchone():
+                    return True
+
+                cursor.execute('UPDATE users SET telegram_id = NULL WHERE telegram_id = ?', (telegram_id,))
+                cursor.execute('UPDATE users SET telegram_id = ? WHERE id = ?', (telegram_id, user_id))
+                return cursor.rowcount > 0
+            except sqlite3.IntegrityError:
+                return False
 
     def get_user_by_telegram_id(self, telegram_id: int) -> Optional[Dict]:
-        """Получает пользователя по Telegram ID"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -310,7 +422,6 @@ class Database:
             return dict(row) if row else None
 
     def get_user_by_username(self, username: str) -> Optional[Dict]:
-        """Получает пользователя по имени пользователя"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -320,7 +431,6 @@ class Database:
             return dict(row) if row else None
 
     def get_all_users_with_telegram(self) -> List[Dict]:
-        """Получает всех пользователей с Telegram ID"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -331,7 +441,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_all_students(self) -> List[Dict]:
-        """Получает всех учеников"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -341,6 +450,28 @@ class Database:
                 WHERE u.role = 'student'
             ''')
             return [dict(row) for row in cursor.fetchall()]
+
+    # ---------- ПРЕДМЕТЫ УЧИТЕЛЯ ----------
+
+    def add_teacher_subject(self, teacher_id: int, subject: str) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT INTO teacher_subjects (teacher_id, subject)
+                    VALUES (?, ?)
+                ''', (teacher_id, subject))
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def get_teacher_subjects(self, teacher_id: int) -> List[str]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT subject FROM teacher_subjects WHERE teacher_id = ?
+            ''', (teacher_id,))
+            return [row['subject'] for row in cursor.fetchall()]
 
     # ---------- КЛАССЫ ----------
 
@@ -354,7 +485,6 @@ class Database:
                 return None
 
     def get_class_id_by_name(self, name: str) -> Optional[int]:
-        """Получает ID класса по имени"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT id FROM classes WHERE name = ?', (name,))
@@ -374,6 +504,13 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def get_class_name_by_id(self, class_id: int) -> Optional[str]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT name FROM classes WHERE id = ?', (class_id,))
+            row = cursor.fetchone()
+            return row['name'] if row else None
+
     # ---------- УЧЕНИКИ ----------
 
     def get_students_by_class(self, class_id: int) -> List[Dict]:
@@ -386,7 +523,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_child_for_parent(self, parent_id: int) -> Optional[Dict]:
-        """Получает ребёнка для родителя"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -408,6 +544,31 @@ class Database:
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def get_parent_by_student(self, student_id: int) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT u.id, u.full_name, u.telegram_id
+                FROM student_parents sp
+                JOIN users u ON sp.parent_id = u.id
+                WHERE sp.student_id = ?
+            ''', (student_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_class_teacher_by_student(self, student_id: int) -> Optional[Dict]:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT u.id, u.full_name, u.telegram_id
+                FROM users u
+                WHERE u.role = 'class_teacher' AND u.class_id = (
+                    SELECT class_id FROM users WHERE id = ?
+                )
+            ''', (student_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     # ---------- ОЦЕНКИ ----------
 
@@ -565,15 +726,12 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Количество пользователей по ролям
             cursor.execute('SELECT role, COUNT(*) as count FROM users GROUP BY role')
             users_by_role = {row['role']: row['count'] for row in cursor.fetchall()}
 
-            # Средний балл по школе
             cursor.execute('SELECT AVG(grade) as avg FROM grades')
             avg_grade = cursor.fetchone()['avg'] or 0
 
-            # Общая посещаемость
             cursor.execute('''
                 SELECT 
                     SUM(CASE WHEN is_present = 1 THEN 1 ELSE 0 END) as present,
