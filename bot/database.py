@@ -2,7 +2,6 @@ import sqlite3
 import hashlib
 import time
 import threading
-from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
@@ -12,7 +11,7 @@ class Database:
         self.db_path = db_path
         self._local = threading.local()
         self.init_tables()
-        self.create_test_data()
+        #self.create_test_data()
 
     @contextmanager
     def get_connection(self):
@@ -173,6 +172,7 @@ class Database:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
+                # Создаем класс 5А если его нет
                 cursor.execute("SELECT id FROM classes WHERE name = '5А'")
                 existing_class = cursor.fetchone()
 
@@ -187,15 +187,14 @@ class Database:
                 def hash_password(password):
                     return hashlib.sha256(password.encode()).hexdigest()
 
+                # Тестовые пользователи
                 test_users = [
                     ("admin", hash_password("admin"), "Администратор школы", "admin", None, None),
                     ("math_teacher", hash_password("123"), "Иванова Мария Петровна", "teacher", None, "Математика"),
-                    ("russian_teacher", hash_password("123"), "Петрова Анна Владимировна", "teacher", None,
-                     "Русский язык"),
+                    ("russian_teacher", hash_password("123"), "Петрова Анна Владимировна", "teacher", None, "Русский язык"),
                     ("ivanov", hash_password("123"), "Иванов Иван Иванович", "student", class_id, None),
                     ("parent_ivanov", hash_password("123"), "Иванова Елена Сергеевна", "parent", None, None),
-                    ("petrova", hash_password("123"), "Петрова Анна Владимировна", "class_teacher", class_id,
-                     "Русский язык"),
+                    ("petrova", hash_password("123"), "Петрова Анна Владимировна", "class_teacher", class_id, "Русский язык,Литература"),
                 ]
 
                 for username, password_hash, full_name, role, class_id_val, subject in test_users:
@@ -213,17 +212,7 @@ class Database:
                         user_id = cursor.lastrowid
                         print(f"✅ Создан пользователь: {username} ({role})")
 
-                        if role == 'teacher' and subject:
-                            subjects = [s.strip() for s in subject.split(',')]
-                            for subj in subjects:
-                                try:
-                                    cursor.execute('''
-                                        INSERT INTO teacher_subjects (teacher_id, subject)
-                                        VALUES (?, ?)
-                                    ''', (user_id, subj))
-                                except sqlite3.IntegrityError:
-                                    pass
-
+                # Добавляем предметы для учителя математики
                 cursor.execute("SELECT id FROM users WHERE username = 'math_teacher'")
                 math_teacher = cursor.fetchone()
                 if math_teacher:
@@ -235,7 +224,37 @@ class Database:
                             ''', (math_teacher['id'], subj))
                         except sqlite3.IntegrityError:
                             pass
+                    print("✅ Добавлены предметы для учителя математики")
 
+                # Добавляем предметы для учителя русского
+                cursor.execute("SELECT id FROM users WHERE username = 'russian_teacher'")
+                russian_teacher = cursor.fetchone()
+                if russian_teacher:
+                    for subj in ["Русский язык", "Литература"]:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO teacher_subjects (teacher_id, subject)
+                                VALUES (?, ?)
+                            ''', (russian_teacher['id'], subj))
+                        except sqlite3.IntegrityError:
+                            pass
+                    print("✅ Добавлены предметы для учителя русского")
+
+                # Добавляем предметы для классного руководителя
+                cursor.execute("SELECT id FROM users WHERE username = 'petrova'")
+                petrova = cursor.fetchone()
+                if petrova:
+                    for subj in ["Русский язык", "Литература"]:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO teacher_subjects (teacher_id, subject)
+                                VALUES (?, ?)
+                            ''', (petrova['id'], subj))
+                        except sqlite3.IntegrityError:
+                            pass
+                    print("✅ Добавлены предметы для классного руководителя")
+
+                # Создаем связь родитель-ребенок
                 cursor.execute("SELECT id FROM users WHERE username = 'parent_ivanov'")
                 parent = cursor.fetchone()
                 cursor.execute("SELECT id FROM users WHERE username = 'ivanov'")
@@ -251,6 +270,7 @@ class Database:
                     except sqlite3.IntegrityError:
                         print("⚠️ Связь родитель-ребенок уже существует")
 
+                # Добавляем тестовые оценки
                 if child:
                     cursor.execute("SELECT id FROM users WHERE username = 'math_teacher'")
                     math_teacher = cursor.fetchone()
@@ -276,6 +296,7 @@ class Database:
                         else:
                             print("⚠️ Тестовые оценки уже существуют")
 
+                # Добавляем тестовое расписание
                 if class_id:
                     cursor.execute("SELECT COUNT(*) as count FROM schedule WHERE class_id = ?", (class_id,))
                     existing_schedule = cursor.fetchone()
@@ -311,16 +332,15 @@ class Database:
             print("\n🔑 Тестовые учетные записи:")
             print("   👑 Администратор: admin / admin")
             print("   👩‍🏫 Учитель математики: math_teacher / 123 (предметы: Математика, Алгебра, Геометрия)")
-            print("   👩‍🏫 Учитель русского: russian_teacher / 123")
+            print("   👩‍🏫 Учитель русского: russian_teacher / 123 (предметы: Русский язык, Литература)")
             print("   👨‍🎓 Ученик: ivanov / 123")
             print("   👪 Родитель: parent_ivanov / 123")
-            print("   👔 Классный руководитель: petrova / 123\n")
+            print("   👔 Классный руководитель: petrova / 123 (предметы: Русский язык, Литература)\n")
 
         except Exception as e:
             print(f"⚠️ Ошибка при создании тестовых данных: {e}")
 
     # ---------- ПОЛЬЗОВАТЕЛИ ----------
-
     def create_user(self, username: str, password: str, full_name: str, role: str,
                     class_id: int = None, subject: str = None) -> Optional[int]:
         password_hash = hashlib.sha256(password.encode()).hexdigest()
@@ -334,33 +354,7 @@ class Database:
                 ''', (username, password_hash, full_name, role, class_id, subject))
                 user_id = cursor.lastrowid
 
-                if role == 'teacher' and subject:
-                    subjects = [s.strip() for s in subject.split(',')]
-                    for subj in subjects:
-                        try:
-                            cursor.execute('''
-                                INSERT INTO teacher_subjects (teacher_id, subject)
-                                VALUES (?, ?)
-                            ''', (user_id, subj))
-                        except sqlite3.IntegrityError:
-                            pass
-
-                return user_id
-            except sqlite3.IntegrityError:
-                return None
-
-    def create_user_with_hash(self, username: str, password_hash: str, full_name: str, role: str,
-                              class_id: int = None, subject: str = None) -> Optional[int]:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute('''
-                    INSERT INTO users (username, password_hash, full_name, role, class_id, subject)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (username, password_hash, full_name, role, class_id, subject))
-                user_id = cursor.lastrowid
-
-                if role == 'teacher' and subject:
+                if role in ['teacher', 'class_teacher'] and subject:
                     subjects = [s.strip() for s in subject.split(',')]
                     for subj in subjects:
                         try:
@@ -388,7 +382,6 @@ class Database:
             return dict(row) if row else None
 
     def update_telegram_id(self, user_id: int, telegram_id: int) -> bool:
-        """Привязывает Telegram ID к пользователю, удаляя старую привязку если есть"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             try:
@@ -452,19 +445,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     # ---------- ПРЕДМЕТЫ УЧИТЕЛЯ ----------
-
-    def add_teacher_subject(self, teacher_id: int, subject: str) -> bool:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute('''
-                    INSERT INTO teacher_subjects (teacher_id, subject)
-                    VALUES (?, ?)
-                ''', (teacher_id, subject))
-                return True
-            except sqlite3.IntegrityError:
-                return False
-
     def get_teacher_subjects(self, teacher_id: int) -> List[str]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -474,23 +454,6 @@ class Database:
             return [row['subject'] for row in cursor.fetchall()]
 
     # ---------- КЛАССЫ ----------
-
-    def create_class(self, name: str, class_teacher_id: int = None) -> Optional[int]:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute('INSERT INTO classes (name, class_teacher_id) VALUES (?, ?)', (name, class_teacher_id))
-                return cursor.lastrowid
-            except sqlite3.IntegrityError:
-                return None
-
-    def get_class_id_by_name(self, name: str) -> Optional[int]:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT id FROM classes WHERE name = ?', (name,))
-            row = cursor.fetchone()
-            return row['id'] if row else None
-
     def get_all_classes(self) -> List[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -512,7 +475,6 @@ class Database:
             return row['name'] if row else None
 
     # ---------- УЧЕНИКИ ----------
-
     def get_students_by_class(self, class_id: int) -> List[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -571,7 +533,6 @@ class Database:
             return dict(row) if row else None
 
     # ---------- ОЦЕНКИ ----------
-
     def add_grade(self, student_id: int, subject: str, grade: int, teacher_id: int, comment: str = None) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -607,7 +568,6 @@ class Database:
             return row['avg'] if row and row['avg'] else 0.0
 
     # ---------- ПОСЕЩАЕМОСТЬ ----------
-
     def mark_attendance(self, student_id: int, subject: str, is_present: bool, teacher_id: int) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -626,7 +586,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     # ---------- ДОМАШНИЕ ЗАДАНИЯ ----------
-
     def add_homework(self, class_id: int, subject: str, text: str, teacher_id: int, deadline: str = None) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -650,7 +609,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     # ---------- ЗАМЕЧАНИЯ ----------
-
     def add_comment(self, student_id: int, teacher_id: int, subject: str, text: str) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -673,16 +631,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     # ---------- РАСПИСАНИЕ ----------
-
-    def add_schedule_entry(self, class_id: int, day_of_week: int, lesson_number: int, subject: str) -> int:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO schedule (class_id, day_of_week, lesson_number, subject)
-                VALUES (?, ?, ?, ?)
-            ''', (class_id, day_of_week, lesson_number, subject))
-            return cursor.lastrowid
-
     def get_schedule_by_class(self, class_id: int, day_of_week: int = None) -> List[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -697,31 +645,7 @@ class Database:
                 ''', (class_id,))
             return [dict(row) for row in cursor.fetchall()]
 
-    # ---------- УВЕДОМЛЕНИЯ ----------
-
-    def add_notification(self, user_id: int, text: str) -> int:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO notifications (user_id, text) VALUES (?, ?)', (user_id, text))
-            return cursor.lastrowid
-
-    def get_unread_notifications(self, user_id: int) -> List[Dict]:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM notifications WHERE user_id = ? AND is_read = 0
-                ORDER BY created_at DESC
-            ''', (user_id,))
-            return [dict(row) for row in cursor.fetchall()]
-
-    def mark_notification_read(self, notification_id: int) -> bool:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE notifications SET is_read = 1 WHERE id = ?', (notification_id,))
-            return cursor.rowcount > 0
-
     # ---------- СТАТИСТИКА ----------
-
     def get_school_statistics(self) -> Dict:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -739,10 +663,7 @@ class Database:
                 FROM attendance
             ''')
             attendance_stats = cursor.fetchone()
-            attendance_rate = (attendance_stats['present'] / attendance_stats['total'] * 100) if attendance_stats[
-                                                                                                     'total'] and \
-                                                                                                 attendance_stats[
-                                                                                                     'total'] > 0 else 0
+            attendance_rate = (attendance_stats['present'] / attendance_stats['total'] * 100) if attendance_stats['total'] and attendance_stats['total'] > 0 else 0
 
             return {
                 'users_by_role': users_by_role,
