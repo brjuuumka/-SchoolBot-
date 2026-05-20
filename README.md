@@ -21,5 +21,5 @@ git clone https://github.com/brjuuumka/-SchoolBot-.git
 cd -SchoolBot-
 pip install -r requirements.txt
 python bot/main.py   # или python -m bot.main
-
+```
 Канбан-доска по прогрессу проекта https://github.com/users/brjuuumka/projects/1/views/1
